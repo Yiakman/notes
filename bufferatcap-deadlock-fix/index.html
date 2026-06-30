@@ -64,7 +64,9 @@
   }
   main { max-width: 680px; margin: 0 auto; }
   h1 { font-size: 23px; font-weight: 500; margin: 0 0 0.4rem; }
-  h2 { font-size: 17px; font-weight: 500; margin: 2.5rem 0 0.5rem; }
+  h2 { font-size: 17px; font-weight: 500; margin: 2.5rem 0 0.5rem; scroll-margin-top: 1.25rem; }
+  h2 .hash { font-weight: 400; color: var(--text-muted); text-decoration: none; margin-left: 8px; font-size: 14px; opacity: 0; transition: opacity .15s; }
+  h2:hover .hash, h2 .hash:focus { opacity: 1; }
   p { font-size: 15px; color: var(--text-secondary); margin: 0 0 0.85rem; }
   code {
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
@@ -176,7 +178,7 @@
   <div class="card c-purple"><p class="name">Buffer &amp; cap</p><p class="def"><code>bufferedData</code> holds fetched items; <code>bufferAtCap</code> pauses fetching at the cap.</p></div>
 </div>
 
-<h2>The pipeline</h2>
+<h2 id="the-pipeline">The pipeline <a class="hash" href="#the-pipeline" aria-label="Link to this section">#</a></h2>
 <p>Every chain fetches into its own buffer. The merge drains both buffers in lockstep to build one root block at a time.</p>
 <svg class="diagram" viewBox="0 0 640 350" role="img">
 <title>Sync pipeline: NTP and EVM fetchers fill buffers, the merge drains them into a root block</title>
@@ -214,7 +216,7 @@
 </svg>
 <p>The runtime then commits the root block to Postgres and runs the state machine over its <code>primitives</code>.</p>
 
-<h2>Pages — fixed-width chunks</h2>
+<h2 id="pages">Pages — fixed-width chunks <a class="hash" href="#pages" aria-label="Link to this section">#</a></h2>
 <p><code>genInputRange</code> chains pages back-to-back: each one starts where the last ended, and is <code>stepSize</code> wide.</p>
 <svg class="diagram" viewBox="0 0 640 140" role="img">
 <title>EVM pages chained back to back, each stepSize blocks wide</title>
@@ -239,7 +241,7 @@
 intervalFromStart(start) { return { from: start, to: start + stepSize }; }
 nextInterval(prevEnd)    { return this.intervalFromStart(prevEnd + 1); }</code></pre>
 
-<h2>Root block &amp; τ</h2>
+<h2 id="root-block-tau">Root block &amp; τ <a class="hash" href="#root-block-tau" aria-label="Link to this section">#</a></h2>
 <p>NTP's timestamp is pure arithmetic: block <code>n</code> is always <code>startTime + blockTimeMS × n</code>. Each new root block — and so τ — lands exactly <code>blockTimeMS</code> after the last.</p>
 <div class="timeline">
   <div class="seg"><span class="tt">block 40</span>τ = 40,000 ms</div>
@@ -253,7 +255,7 @@ toRootOutput(data) { return { blockNumber: ..., timestamp: this.toRootPage(data)
 toRootPage(data)   { return toMsTimestamp(data.raw.timestamp); }  // startTime + blockTimeMS·n</code></pre>
 <p>A parallel chain (EVM) only gets drained once its own page's timestamp passes τ. Until then, the merge just waits — and not because of what's <em>in</em> its buffer.</p>
 
-<h2>Page ≠ data — why the merge waits on the page, not the buffer</h2>
+<h2 id="page-not-data">Page ≠ data — why the merge waits on the page, not the buffer <a class="hash" href="#page-not-data" aria-label="Link to this section">#</a></h2>
 <p>
   The buffer only holds items that matched something. It can't prove the chain has actually
   <em>looked</em> at every block up to τ — only the page can prove that. Say EVM has fetched up
@@ -289,7 +291,7 @@ this.newPageCondVar.wake();</code></pre>
 </div>
 <p>An empty page is just as valid a completeness proof as a full one — it's the page boundary that unblocks the merge, not the data.</p>
 
-<h2>What's actually in the buffer</h2>
+<h2 id="buffer-and-cap">What's actually in the buffer <a class="hash" href="#buffer-and-cap" aria-label="Link to this section">#</a></h2>
 <p>Each fetch can push zero or many items — one per matched block/event, not one per page. <code>bufferAtCap</code> compares that item count to a cap.</p>
 <svg class="diagram" viewBox="0 0 640 170" role="img">
 <title>EVM buffer holding individual items up to the cap, fed by fetch and drained by merge</title>
@@ -333,7 +335,7 @@ function bufferCapFor(syncProtocol) {
 }</code></pre>
 <p>At the cap, the chain's <code>stateToInput</code> returns <code>undefined</code> for that poll — the fetch loop just sleeps until the merge drains enough items.</p>
 
-<h2>The deadlock</h2>
+<h2 id="the-deadlock">The deadlock <a class="hash" href="#the-deadlock" aria-label="Link to this section">#</a></h2>
 <p>The merge only drains a chain's buffer <em>after</em> its page passes τ. If the cap pauses the fetcher first, nothing can move.</p>
 <svg class="diagram" viewBox="0 0 640 300" role="img">
 <title>Before the fix: a circular wait between the paused fetcher, the full buffer, and the waiting merge</title>
@@ -371,7 +373,7 @@ function bufferCapFor(syncProtocol) {
 <text class="t" x="320" y="135" text-anchor="middle" dominant-baseline="central" style="fill:var(--danger-text)">deadlock</text>
 </svg>
 
-<h2>The fix — mergeWaitingForPage</h2>
+<h2 id="the-fix">The fix — mergeWaitingForPage <a class="hash" href="#the-fix" aria-label="Link to this section">#</a></h2>
 <p>While the merge is gated on a chain's page, that chain is exempt from the cap. The fetch keeps going until the page passes τ.</p>
 <pre><code>state.mergeWaitingForPage = true;          // set by mergeIntoRoot, just before it blocks
 
@@ -413,7 +415,7 @@ const atCap = !state.mergeWaitingForPage && state.bufferedData.size() >= cap;</c
 </svg>
 <p>Once the page passes τ, the merge drains the buffer and the cap re-engages — the overshoot was bounded by exactly <code>(lastPage, τ]</code>, never unbounded.</p>
 
-<h2>See it happen</h2>
+<h2 id="see-it-happen">See it happen <a class="hash" href="#see-it-happen" aria-label="Link to this section">#</a></h2>
 <p>One EVM-style chain skipping ahead to pass τ = block 8, against a cap of 5 items. Toggle the fix, then press play.</p>
 
 <div class="toggle-row">
