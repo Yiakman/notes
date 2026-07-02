@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How the sync loop fails: two error classes, one bounded retry</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface-1: #f1efe8;
+    --text-primary: #1a1a18;
+    --text-secondary: #5f5e5a;
+    --text-muted: #888780;
+    --border: #d3d1c7;
+    --accent-bg: #e6f1fb;
+    --accent-text: #0c447c;
+    --accent-fill: #378add;
+    --danger-bg: #fcebeb;
+    --danger-text: #791f1f;
+    --danger-fill: #e24b4a;
+    --success-bg: #eaf3de;
+    --success-text: #27500a;
+    --success-fill: #639922;
+    --warning-bg: #faeeda;
+    --warning-text: #633806;
+    --warning-fill: #ba7517;
+    --purple-bg: #eeedfe;
+    --purple-text: #3c3489;
+    --purple-fill: #7f77dd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1a;
+      --surface-1: #2c2c2a;
+      --text-primary: #f1efe8;
+      --text-secondary: #b4b2a9;
+      --text-muted: #888780;
+      --border: #444441;
+      --accent-bg: #0c447c;
+      --accent-text: #b5d4f4;
+      --accent-fill: #378add;
+      --danger-bg: #791f1f;
+      --danger-text: #f7c1c1;
+      --danger-fill: #e24b4a;
+      --success-bg: #27500a;
+      --success-text: #c0dd97;
+      --success-fill: #639922;
+      --warning-bg: #633806;
+      --warning-text: #fac775;
+      --warning-fill: #ba7517;
+      --purple-bg: #3c3489;
+      --purple-text: #cecbf6;
+      --purple-fill: #7f77dd;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2.5rem 1.5rem 4rem;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  main { max-width: 680px; margin: 0 auto; }
+  h1 { font-size: 23px; font-weight: 500; margin: 0 0 0.4rem; }
+  h2 { font-size: 17px; font-weight: 500; margin: 2.5rem 0 0.5rem; scroll-margin-top: 1.25rem; }
+  h2 .hash { font-weight: 400; color: var(--text-muted); text-decoration: none; margin-left: 8px; font-size: 14px; opacity: 0; transition: opacity .15s; }
+  h2:hover .hash, h2 .hash:focus { opacity: 1; }
+  p { font-size: 15px; color: var(--text-secondary); margin: 0 0 0.85rem; }
+  a { color: var(--accent-text); }
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    background: var(--surface-1);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--text-primary);
+  }
+  pre {
+    background: var(--surface-1);
+    padding: 0.8rem 1rem;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    line-height: 1.55;
+    margin: 0.75rem 0 1rem;
+  }
+  pre code { background: none; padding: 0; }
+  .subtitle { font-size: 14px; color: var(--text-muted); margin-bottom: 1.75rem; }
+  ul.tight { margin: 0 0 1rem; padding-left: 1.1rem; }
+  ul.tight li { font-size: 14px; color: var(--text-secondary); margin-bottom: 4px; }
+  ul.tight strong { color: var(--text-primary); font-weight: 500; }
+
+  /* stage table */
+  table { border-collapse: collapse; width: 100%; margin: 0.75rem 0 1.25rem; font-size: 13.5px; }
+  th { text-align: left; font-weight: 500; font-size: 12.5px; color: var(--text-muted); padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--border); color: var(--text-secondary); vertical-align: top; }
+  td:first-child { white-space: nowrap; color: var(--text-primary); font-weight: 500; }
+  .pill { display: inline-block; font-size: 11.5px; font-weight: 500; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+  .pill.tolerated { background: var(--success-bg); color: var(--success-text); }
+  .pill.bounded { background: var(--warning-bg); color: var(--warning-text); }
+  .pill.fatal { background: var(--danger-bg); color: var(--danger-text); }
+  .pill.dead { background: var(--surface-1); color: var(--text-muted); }
+
+  /* concept cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 1.5rem; }
+  .card { background: var(--surface-1); border-radius: 10px; padding: 0.7rem 0.9rem; border-left: 3px solid var(--border); }
+  .card.c-accent { border-left-color: var(--accent-fill); }
+  .card.c-danger { border-left-color: var(--danger-fill); }
+  .card.c-success { border-left-color: var(--success-fill); }
+  .card.c-warning { border-left-color: var(--warning-fill); }
+  .card.c-purple { border-left-color: var(--purple-fill); }
+  .card .name { font-size: 13px; font-weight: 500; margin: 0 0 2px; color: var(--text-primary); }
+  .card .def { font-size: 12.5px; color: var(--text-secondary); margin: 0; line-height: 1.45; }
+
+  /* callout */
+  .callout { border-radius: 10px; padding: 0.75rem 1rem; margin: 0.75rem 0 1.25rem; font-size: 14px; }
+  .callout.warn { background: var(--warning-bg); color: var(--warning-text); }
+  .callout.ok { background: var(--success-bg); color: var(--success-text); }
+  .callout.info { background: var(--accent-bg); color: var(--accent-text); }
+  .callout.bad { background: var(--danger-bg); color: var(--danger-text); }
+  .callout code { background: rgba(127,127,127,.15); color: inherit; }
+
+  /* escalation timeline */
+  .timeline { display: flex; align-items: stretch; gap: 0; margin: 0.75rem 0 1.25rem; }
+  .timeline .seg { flex: 1; padding: 10px 8px; text-align: center; font-size: 12px; border-radius: 8px; }
+  .timeline .seg .tt { font-weight: 500; font-size: 13px; display: block; margin-bottom: 2px; }
+  .timeline .conn { flex: 0 0 auto; padding: 0 8px; align-self: center; text-align: center; font-size: 11px; color: var(--text-muted); }
+  .timeline .conn .arrow { font-size: 14px; line-height: 1; }
+  .seg.s-ok { background: var(--success-bg); color: var(--success-text); }
+  .seg.s-warn { background: var(--warning-bg); color: var(--warning-text); }
+  .seg.s-bad { background: var(--danger-bg); color: var(--danger-text); }
+</style>
+</head>
+<body>
+<main>
+<h1>How the sync loop fails</h1>
+<p class="subtitle">Two error classes, one bounded retry — the failure design of Effectstream's per-chain fetch loop (<code>startSync</code>), plus how transient Postgres errors are kept from crashing the node. July 2026.</p>
+
+<p>Every configured chain gets one <code>startSync</code> loop (an <a href="https://frontside.com/effection">effection</a> task). Per iteration it computes the next page range, fetches it from the chain RPC, and buffers the result for the merge loop. The design question this note answers: <strong>when a stage throws, who catches it, and should the node survive?</strong></p>
+
+<h2 id="stages"><a class="hash" href="#stages">#</a>The five stages and their error classes</h2>
+
+<table>
+<thead><tr><th>Stage</th><th>What it does</th><th>On error</th></tr></thead>
+<tbody>
+<tr><td>0 · startAsync</td><td>Background producer spawn — websocket subscriptions for utxorpc/Midnight; a no-op for NTP/EVM.</td><td><span class="pill bounded">bounded retry</span> 5 attempts, then rethrow → fatal</td></tr>
+<tr><td>1 · stateToInput</td><td>Compute the next page range to fetch (talks to the chain RPC for the tip).</td><td><span class="pill tolerated">tolerated forever</span> count, log, sleep, retry</td></tr>
+<tr><td>2 · readData</td><td>Fetch the page range from the chain RPC.</td><td><span class="pill tolerated">tolerated forever</span> count, log, sleep, retry</td></tr>
+<tr><td>3 · updateState</td><td>Push outputs to the in-memory buffer, wake the merge's condition variables.</td><td><span class="pill fatal">fatal</span> escapes the task, halts the scope</td></tr>
+<tr><td>4 · producerChannel.send</td><td>Hand outputs to a channel…that nothing consumes.</td><td><span class="pill dead">can't fail</span> effection channels drop sends with no subscriber</td></tr>
+</tbody>
+</table>
+
+<p>The principle: <strong>stages that talk to the outside world get tolerance; in-process plumbing gets none.</strong> A chain RPC returning 503 is weather — expected, transient, survivable. A throw from <code>updateState</code> (pure Deque + CondVar bookkeeping) is a logic bug, and limping past it risks silent state divergence, which is strictly worse than a crash. So it escapes the spawned task, effection's structured concurrency halts the whole scope, and the process exits for the supervisor to restart.</p>
+
+<div class="cards">
+<div class="card c-success"><p class="name">tryYield</p><p class="def">A ~10-line try/catch that turns an Operation's throw into a <code>{data, error}</code> result. Stages 1–2 are wrapped in it; that's the entire tolerance mechanism.</p></div>
+<div class="card c-accent"><p class="name">consecutiveErrors</p><p class="def">Per-chain failure streak, surfaced in the node's 60-second heartbeat. Bumped on every caught error alongside <code>lastErrorTimestamp</code>.</p></div>
+<div class="card c-danger"><p class="name">Halt = crash-only recovery</p><p class="def">An escaped error reaches effection's <code>main()</code>, which exits the process. Restart flows through the block-accurate resume path — the best-tested recovery code in the system.</p></div>
+</div>
+
+<h2 id="stage0"><a class="hash" href="#stage0">#</a>Why stage 0 gets a <em>bounded</em> retry, not infinite tolerance</h2>
+
+<p>Stage 0 used to be unwrapped: any throw from <code>startAsync</code> was instantly fatal. That violated the principle above — connecting a websocket <em>is</em> talking to the outside world, and a Cardano node being briefly unreachable at boot shouldn't kill the whole process.</p>
+
+<p>But copying stages 1–2's retry-forever would be worse than the crash it replaces. If the producer is permanently dead, its chain's data never arrives, and the merge loop — which waits on the <em>slowest</em> chain before producing each block — stalls behind it indefinitely. The node looks healthy while producing nothing: a zombie. A crash at least gets a supervisor restart and an alert.</p>
+
+<div class="callout warn">The failure asymmetry: a dead <em>fetch</em> loop keeps erroring visibly (streak climbs, heartbeat shows it). A dead <em>producer</em> fails once and then goes silent — there is no per-iteration signal left to escalate on. Bounded retry is the compromise: absorb blips, refuse to become a zombie.</div>
+
+<p>So stage 0 now runs the same treatment as stages 1–2 (<code>tryYield</code>, streak bump, log, sleep one polling interval) but capped at 5 attempts, after which it rethrows the <em>original</em> error — not a generic "max attempts reached" — so the crash log at 3am names the real cause. One honest scope limit: this covers connect-time failures. A websocket that drops <em>mid-stream</em>, after <code>startAsync</code> resolved, never passes through this code again; reconnection there remains each fetcher's internal job.</p>
+
+<h2 id="streak"><a class="hash" href="#streak">#</a>The consecutiveErrors trap: where to put the reset</h2>
+
+<p>The streak used to reset in exactly one place: after a successful fetch. That has a stale-gauge bug — a chain that errors a few times and then catches up (its <code>stateToInput</code> starts returning "nothing to fetch") never fetches again while idle, so the heartbeat reports a non-zero failure streak forever on a perfectly healthy chain.</p>
+
+<p>The tempting fix is wrong in the opposite direction: reset after any successful <code>stateToInput</code>. Then a chain whose <em>readData</em> persistently fails oscillates 0→1→0→1 — the streak can never exceed 1, and the heartbeat's main signal for a broken RPC is destroyed.</p>
+
+<div class="callout ok">The invariant that resolves both: <strong>the streak ends only when a full iteration succeeds</strong> — and there are exactly two ways an iteration succeeds: a fetch returned data, or the chain reported caught-up. Reset in both places, nowhere else.</div>
+
+<p>A unit test pins each side: one asserts the streak is zero after errors-then-idle (fails on the old code), and a pre-existing one asserts the streak reaches ≥2 under persistent <code>readData</code> failure (fails under the naive fix).</p>
+
+<h2 id="pg"><a class="hash" href="#pg">#</a>The other half: transient Postgres errors</h2>
+
+<p>Chain RPC errors are caught <em>in-band</em> by <code>tryYield</code>, in generator code, inside the loop that made the call. Postgres errors are messier: on serverless Postgres (Neon), cold-start RSTs, idle-socket evictions, and TLS blips are <em>routine</em>, and a dying socket can reject a promise nobody is currently awaiting — surfacing out-of-band as a process-level <code>unhandledRejection</code>. So pg gets its own three-layer treatment, all keyed on one classifier:</p>
+
+<div class="cards">
+<div class="card c-accent"><p class="name">isTransientPgError</p><p class="def">Deliberately narrow allow-list: known message fragments ("Connection terminated unexpectedly", "Query read timeout", …), or <code>ECONNRESET</code>/<code>EPIPE</code>/<code>ECONNREFUSED</code> <em>with a stack inside pg/pg-pool</em>. Walks the <code>cause</code> chain. Anything else — auth failures, SQL bugs — is not transient and still crashes.</p></div>
+<div class="card c-success"><p class="name">Layer 1: per-block retry</p><p class="def"><code>processFinalizedBlockWithRetry</code> re-runs the whole block from <code>BEGIN</code> on a <em>fresh</em> pool client (the old socket is destroyed, never recycled), with exponential backoff capped at 5s. Safe because the failed transaction never committed and the block stream only advances on success.</p></div>
+<div class="card c-warning"><p class="name">Layer 2: outage escalation</p><p class="def"><code>PoolErrorTracker</code> aggregates consecutive transient failures process-wide. Individually they log as WARN; past 60s of sustained failure they escalate to ERROR; past 5 minutes the process exits — a real outage, hand it to the supervisor.</p></div>
+<div class="card c-danger"><p class="name">Layer 3: the global net</p><p class="def">The process-level <code>unhandledRejection</code> handler asks the same classifier: transient pg → log WARN and survive (the pool recovers on the next query); anything else → log ERROR and <code>exit(1)</code>. Silent bug-swallowing is never an option.</p></div>
+</div>
+
+<div class="timeline">
+<div class="seg s-ok"><span class="tt">blip</span>WARN, retry with backoff</div>
+<div class="conn"><div class="arrow">→</div>60s</div>
+<div class="seg s-warn"><span class="tt">sustained</span>ERROR, keep retrying</div>
+<div class="conn"><div class="arrow">→</div>5min</div>
+<div class="seg s-bad"><span class="tt">outage</span>exit(1), supervisor restarts</div>
+</div>
+
+<p>Note the contrast with the sync loop: the fetch loop tolerates chain errors <em>forever</em> (a chain being down for a day is the chain's problem; the node keeps serving the others), while pg failures are on a clock — the database being down means no blocks are committing at all, so past 5 minutes a restart is more likely to help than more retries.</p>
+
+<h2 id="where"><a class="hash" href="#where">#</a>Where an error is thrown decides who catches it — not its shape</h2>
+
+<p>The two systems never overlap, and it's worth being precise about why. A pg-<em>shaped</em> error (right message, right code) thrown from inside a chain fetcher is caught by <code>tryYield</code> like any other fetch error — it bumps the streak and never reaches the global handler. The pg exemption only applies to rejections that leak out of <em>everything</em>, which in practice means out-of-band socket failures. The classifier's narrowness plus this structural separation is what keeps "survive transient pg errors" from quietly becoming "survive arbitrary bugs that happen to mention connections".</p>
+
+<div class="callout info">One suite proves each direction: the sync tests assert fetcher errors (including deliberately pg-shaped ones) never fire the global handler; the db tests assert genuine out-of-band pool rejections do — and survive only when the classifier says so.</div>
+
+</main>
+</body>
+</html>
